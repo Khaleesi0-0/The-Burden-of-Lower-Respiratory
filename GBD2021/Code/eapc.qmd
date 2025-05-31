@@ -1,0 +1,1241 @@
+---
+title: "updated"
+format: html
+editor: visual
+---
+
+```{r}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(sf)
+library(rnaturalearth)
+library(ggplot2)
+library(RColorBrewer)
+library(scales)
+library(ggspatial)     # for annotation_scale() & north arrow
+library(countrycode)
+library(kableExtra)
+```
+
+# EAPC
+
+```{r}
+GBD <- read_csv("../Data/eapc.csv")
+# 1) compute the 1990/2019 ASR-deaths & DALYs formatted strings
+tbl <- GBD %>%
+  filter(
+    rei    == "Air pollution",
+    cause  == "Lower respiratory infections",
+    year  %in% c(1990, 2021),
+    (age == "Age-standardized" & metric == "Rate"   & measure == "Deaths") |
+    (age == "All ages"         & metric == "Number" & measure == "DALYs (Disability-Adjusted Life Years)")
+  ) %>%
+  mutate(
+    indicator = case_when(
+      measure == "Deaths" ~ "death_ASR",
+      TRUE                ~ "DALYs"
+    )
+  ) %>%
+  group_by(location, year, indicator) %>%
+  summarise(
+    val   = sum(val),
+    lower = sum(lower),
+    upper = sum(upper),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    formatted = case_when(
+      indicator == "death_ASR" ~ sprintf("%.2f (%.2f - %.2f)", val, lower, upper),
+      indicator == "DALYs"     ~ sprintf("%.0f (%0.0f - %.0f)",     val, lower, upper)
+    )
+  ) %>%
+  select(location, year, indicator, formatted) %>%
+  pivot_wider(
+    names_from  = c(indicator, year),
+    values_from = formatted,
+    names_sep   = "_"
+  ) %>%
+  arrange(location)
+
+# 2) compute the EAPC (with CI) formatted string
+eapc <- GBD %>%
+  filter(
+    rei     == "Air pollution",
+    age     == "Age-standardized",
+    metric  == "Rate",
+    measure == "DALYs (Disability-Adjusted Life Years)",
+    cause  == "Lower respiratory infections"
+  ) %>%
+  group_by(location) %>%
+  summarise(
+    β      = coef(lm(log(val)   ~ year, data = cur_data()))[2],
+    β_lo   = coef(lm(log(lower) ~ year, data = cur_data()))[2],
+    β_hi   = coef(lm(log(upper) ~ year, data = cur_data()))[2],
+    .groups = "drop"
+  ) %>%
+  mutate(
+    EAPC       = (exp(β    ) - 1) * 100,
+    EAPC_lo    = (exp(β_lo ) - 1) * 100,
+    EAPC_hi    = (exp(β_hi ) - 1) * 100,
+    EAPC       = sprintf("%.2f (%.2f - %.2f)", EAPC, EAPC_lo, EAPC_hi)
+  ) %>%
+  select(location, EAPC)
+
+# 3) join and rename into the exact columns you asked for
+combined <- tbl %>%
+  left_join(eapc, by = "location") %>%
+  rename(
+    ASR_1990  = death_ASR_1990,
+    ASR_2021  = death_ASR_2021,
+    DALY_1990 = DALYs_1990,
+    DALY_2021 = DALYs_2021
+  ) %>%
+  select(location, ASR_1990, ASR_2021, DALY_1990, DALY_2021, EAPC)
+
+print(combined)
+
+
+
+```
+
+# Map
+
+```{r}
+nation <- read_csv("../Data/nation.csv")
+glimpse(nation)
+```
+
+## Data wrangling
+
+```{r}
+nation <- read_csv("../Data/nation.csv") %>%
+  mutate(
+    # “clean” each GBD name
+    location_clean = recode(location,
+      "People's Republic of China"             = "China",
+      "Democratic People's Republic of Korea"  = "North Korea",
+      "Taiwan (Province of China)"             = "Taiwan",
+      "Republic of Indonesia"                  = "Indonesia",
+      "Kingdom of Cambodia"                    = "Cambodia",
+      "Malaysia"                               = "Malaysia",
+      "Lao People's Democratic Republic"       = "Laos",
+      "Republic of the Union of Myanmar"       = "Myanmar",
+      "Republic of Maldives"                   = "Maldives",
+      "Democratic Socialist Republic of Sri Lanka" = "Sri Lanka",
+      "Republic of the Philippines"            = "Philippines",
+      "Democratic Republic of Timor-Leste"     = "Timor-Leste",
+      "Kingdom of Thailand"                    = "Thailand",
+      "Socialist Republic of Viet Nam"         = "Vietnam",
+      "Republic of Kiribati"                   = "Kiribati",
+      "Republic of Fiji"                       = "Fiji",
+      "Federated States of Micronesia"         = "Micronesia",
+      "Republic of the Marshall Islands"       = "Marshall Islands",
+      "Independent State of Samoa"             = "Samoa",
+      "Independent State of Papua New Guinea"  = "Papua New Guinea",
+      "Kingdom of Tonga"                       = "Tonga",
+      "Solomon Islands"                        = "Solomon Islands",
+      "Republic of Vanuatu"                    = "Vanuatu",
+      "Republic of Armenia"                    = "Armenia",
+      "Georgia"                                = "Georgia",
+      "Republic of Azerbaijan"                 = "Azerbaijan",
+      "Kyrgyz Republic"                        = "Kyrgyzstan",
+      "Republic of Kazakhstan"                 = "Kazakhstan",
+      "Republic of Tajikistan"                 = "Tajikistan",
+      "Mongolia"                               = "Mongolia",
+      "Republic of Uzbekistan"                 = "Uzbekistan",
+      "Turkmenistan"                           = "Turkmenistan",
+      "Republic of Albania"                    = "Albania",
+      "Republic of Bulgaria"                   = "Bulgaria",
+      "Bosnia and Herzegovina"                 = "Bosnia and Herzegovina",
+      "Czech Republic"                         = "Czech Republic",
+      "Republic of Croatia"                    = "Croatia",
+      "North Macedonia"                        = "North Macedonia",
+      "Hungary"                                = "Hungary",
+      "Republic of Poland"                     = "Poland",
+      "Montenegro"                             = "Montenegro",
+      "Republic of Serbia"                     = "Serbia",
+      "Republic of Slovenia"                   = "Slovenia",
+      "Romania"                                = "Romania",
+      "Republic of Belarus"                    = "Belarus",
+      "Slovak Republic"                        = "Slovakia",
+      "Republic of Latvia"                     = "Latvia",
+      "Republic of Moldova"                    = "Moldova",
+      "Republic of Estonia"                    = "Estonia",
+      "Ukraine"                                = "Ukraine",
+      "Republic of Lithuania"                  = "Lithuania",
+      "Russian Federation"                     = "Russia",
+      "Japan"                                  = "Japan",
+      "Brunei Darussalam"                      = "Brunei",
+      "Republic of Singapore"                  = "Singapore",
+      "Australia"                              = "Australia",
+      "Republic of Korea"                      = "South Korea",
+      "New Zealand"                            = "New Zealand",
+      "Republic of Austria"                    = "Austria",
+      "Republic of Cyprus"                     = "Cyprus",
+      "Principality of Andorra"                = "Andorra",
+      "Republic of Finland"                    = "Finland",
+      "Kingdom of Belgium"                     = "Belgium",
+      "Kingdom of Denmark"                     = "Denmark",
+      "French Republic"                        = "France",
+      "Federal Republic of Germany"            = "Germany",
+      "Hellenic Republic"                      = "Greece",
+      "Republic of Iceland"                    = "Iceland",
+      "Ireland"                                = "Ireland",
+      "State of Israel"                        = "Israel",
+      "Republic of Italy"                      = "Italy",
+      "Grand Duchy of Luxembourg"              = "Luxembourg",
+      "Kingdom of the Netherlands"             = "Netherlands",
+      "Portuguese Republic"                    = "Portugal",
+      "Republic of Malta"                      = "Malta",
+      "Kingdom of Sweden"                      = "Sweden",
+      "Kingdom of Norway"                      = "Norway",
+      "Kingdom of Spain"                       = "Spain",
+      "United Kingdom of Great Britain and Northern Ireland" = "United Kingdom",
+      "Swiss Confederation"                    = "Switzerland",
+      "Argentine Republic"                     = "Argentina",
+      "Eastern Republic of Uruguay"            = "Uruguay",
+      "Republic of Chile"                      = "Chile",
+      "Canada"                                 = "Canada",
+      "United States of America"               = "United States",
+      "Antigua and Barbuda"                    = "Antigua and Barbuda",
+      "Barbados"                               = "Barbados",
+      "Commonwealth of the Bahamas"            = "Bahamas",
+      "Republic of Cuba"                       = "Cuba",
+      "Belize"                                 = "Belize",
+      "Dominican Republic"                     = "Dominican Republic",
+      "Commonwealth of Dominica"               = "Dominica",
+      "Republic of Guyana"                     = "Guyana",
+      "Grenada"                                = "Grenada",
+      "Republic of Haiti"                      = "Haiti",
+      "Jamaica"                                = "Jamaica",
+      "Saint Lucia"                            = "Saint Lucia",
+      "Saint Vincent and the Grenadines"       = "Saint Vincent and the Grenadines",
+      "Republic of Trinidad and Tobago"        = "Trinidad and Tobago",
+      "Republic of Suriname"                   = "Suriname",
+      "Plurinational State of Bolivia"         = "Bolivia",
+      "Republic of Peru"                       = "Peru",
+      "Republic of Colombia"                   = "Colombia",
+      "Republic of Ecuador"                    = "Ecuador",
+      "Republic of Costa Rica"                 = "Costa Rica",
+      "Republic of El Salvador"                = "El Salvador",
+      "Republic of Guatemala"                  = "Guatemala",
+      "Republic of Honduras"                   = "Honduras",
+      "Republic of Nicaragua"                  = "Nicaragua",
+      "Republic of Panama"                     = "Panama",
+      "Bolivarian Republic of Venezuela"       = "Venezuela",
+      "Republic of Paraguay"                   = "Paraguay",
+      "Federative Republic of Brazil"          = "Brazil",
+      "People's Democratic Republic of Algeria"= "Algeria",
+      "Arab Republic of Egypt"                 = "Egypt",
+      "Kingdom of Bahrain"                     = "Bahrain",
+      "Republic of Iraq"                       = "Iraq",
+      "Islamic Republic of Iran"               = "Iran",
+      "Hashemite Kingdom of Jordan"            = "Jordan",
+      "State of Kuwait"                        = "Kuwait",
+      "State of Libya"                         = "Libya",
+      "Lebanese Republic"                      = "Lebanon",
+      "Kingdom of Morocco"                     = "Morocco",
+      "Palestine"                              = "Palestine",
+      "Syrian Arab Republic"                   = "Syria",
+      "State of Qatar"                         = "Qatar",
+      "Republic of Turkey"                     = "Turkey",
+      "United Mexican States"                  = "Mexico",
+      "Sultanate of Oman"                      = "Oman",
+      "Republic of Tunisia"                    = "Tunisia",
+      "Kingdom of Saudi Arabia"                = "Saudi Arabia",
+      "Republic of Yemen"                      = "Yemen",
+      "People's Republic of Bangladesh"        = "Bangladesh",
+      "United Arab Emirates"                   = "United Arab Emirates",
+      "Republic of India"                      = "India",
+      "Islamic Republic of Afghanistan"        = "Afghanistan",
+      "Kingdom of Bhutan"                      = "Bhutan",
+      "Islamic Republic of Pakistan"           = "Pakistan",
+      "Federal Democratic Republic of Nepal"   = "Nepal",
+      "Central African Republic"               = "Central African Republic",
+      "Republic of Angola"                     = "Angola",
+      "Democratic Republic of the Congo"       = "Democratic Republic of the Congo",
+      "Republic of the Congo"                  = "Republic of the Congo",
+      "Gabonese Republic"                      = "Gabon",
+      "Republic of Equatorial Guinea"          = "Equatorial Guinea",
+      "Republic of Burundi"                    = "Burundi",
+      "Union of the Comoros"                   = "Comoros",
+      "Republic of Djibouti"                   = "Djibouti",
+      "State of Eritrea"                       = "Eritrea",
+      "Federal Democratic Republic of Ethiopia"= "Ethiopia",
+      "Republic of Madagascar"                 = "Madagascar",
+      "Republic of Kenya"                      = "Kenya",
+      "Republic of Malawi"                     = "Malawi",
+      "Republic of Mauritius"                  = "Mauritius",
+      "Republic of Rwanda"                     = "Rwanda",
+      "Republic of Mozambique"                 = "Mozambique",
+      "Republic of Seychelles"                 = "Seychelles",
+      "Federal Republic of Somalia"            = "Somalia",
+      "Republic of Uganda"                     = "Uganda",
+      "United Republic of Tanzania"            = "Tanzania",
+      "Republic of Zambia"                     = "Zambia",
+      "Kingdom of Lesotho"                     = "Lesotho",
+      "Republic of South Africa"               = "South Africa",
+      "Republic of Botswana"                   = "Botswana",
+      "Republic of Zimbabwe"                   = "Zimbabwe",
+      "Republic of Namibia"                    = "Namibia",
+      "Kingdom of Eswatini"                    = "Eswatini",
+      "Republic of Benin"                      = "Benin",
+      "Republic of Cameroon"                   = "Cameroon",
+      "Republic of Chad"                       = "Chad",
+      "Burkina Faso"                           = "Burkina Faso",
+      "Republic of the Gambia"                 = "Gambia",
+      "Republic of Cabo Verde"                 = "Cabo Verde",
+      "Republic of Côte d'Ivoire"              = "Côte d'Ivoire",
+      "Republic of Guinea"                     = "Guinea",
+      "Republic of Liberia"                    = "Liberia",
+      "Republic of Ghana"                      = "Ghana",
+      "Islamic Republic of Mauritania"         = "Mauritania",
+      "Republic of Guinea-Bissau"              = "Guinea-Bissau",
+      "Federal Republic of Nigeria"            = "Nigeria",
+      "Republic of Mali"                       = "Mali",
+      "Republic of the Niger"                  = "Niger",
+      "Republic of Senegal"                    = "Senegal",
+      "Togolese Republic"                      = "Togo",
+      "Democratic Republic of Sao Tome and Principe" = "Sao Tome and Principe",
+      "American Samoa"                         = "American Samoa",
+      "Republic of Sierra Leone"               = "Sierra Leone",
+      "Cook Islands"                           = "Cook Islands",
+      "Guam"                                   = "Guam",
+      "Bermuda"                                = "Bermuda",
+      "Greenland"                              = "Greenland",
+      "Republic of Nauru"                      = "Nauru",
+      "Principality of Monaco"                 = "Monaco",
+      "Northern Mariana Islands"               = "Northern Mariana Islands",
+      "Puerto Rico"                            = "Puerto Rico",
+      "Republic of San Marino"                 = "San Marino",
+      "Republic of Niue"                       = "Niue",
+      "Republic of Palau"                      = "Palau",
+      "Saint Kitts and Nevis"                  = "Saint Kitts and Nevis",
+      "Tuvalu"                                 = "Tuvalu",
+      "Tokelau"                                = "Tokelau",
+      "Republic of South Sudan"                = "South Sudan",
+      "United States Virgin Islands"           = "United States Virgin Islands",
+      "Republic of Sudan"                      = "Sudan"
+    ),
+    # grab ISO3
+    iso_a3 = countrycode(location_clean,
+                         origin      = "country.name",
+                         destination = "iso3c")
+  )
+
+# check if any still failed
+nation %>% filter(is.na(iso_a3))
+
+asr_df <- nation %>%
+  filter(
+    rei     == "Air pollution",
+    age     == "Age-standardized",
+    metric  == "Rate",
+    measure == "Deaths",
+    year    == 2021
+  ) %>%
+  select(iso_a3, val)
+
+# Get world map and join on ISO3
+world <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  filter(continent != "Antarctica") 
+world_asr <- left_join(world, asr_df, by = "iso_a3")
+
+```
+
+## Plot
+
+```{r}  
+world_robin <- st_transform(world_asr, crs = "+proj=robin")
+
+# plot
+map_asr <- ggplot(world_robin) +
+  # light grey base for every country
+  geom_sf(fill = "grey95", color = "white", size = 0.2) +
+  # overlay your ASR values
+  geom_sf(aes(fill = val), color = "grey50", size = 0.1) +
+  # 5‐bin red scale matching your example
+  scale_fill_stepsn(
+    colours  = brewer.pal(5, "Reds"),
+    breaks   = c(0, 2, 5, 10, 20),
+    labels   = c("0–2", "2–5", "5–10", "10–20", "20+"),
+    limits   = c(0, 20),
+    oob      = squish,
+    na.value = "white",
+    name     = "ASR\n(per 10⁵)"
+  ) +
+  # locked to Robinson, no extra padding
+  coord_sf(crs = "+proj=robin", datum = NA, expand = FALSE) +
+  # clean theme
+  theme_void(base_size = 14) +
+  theme(
+    plot.tag           = element_text(face="bold", size=18),
+    plot.title       = element_text(face = "bold", size = 16),
+    plot.subtitle    = element_text(size = 12),
+    legend.position.inside      = c(0.98, 0.98),  # near top‐right
+    legend.justification.inside = c(1, 1),    
+    legend.background= element_rect(fill = "white", color = NA),
+    legend.title     = element_text(size = 12),
+    legend.text      = element_text(size = 10)
+  ) +
+  labs(
+    tag      = "A",
+    title    = "Age-Standardized Death Rate from /n Lower Respiratory Infections Attributable to Air Pollution (2021)",
+    subtitle = "per 100,000 population",
+    caption  = "Source: Global Burden of Disease Study 2021 Results"
+  )
+
+# 6) Preview
+print(map_asr)
+
+# or, if you need a high-res TIFF:
+ggsave(
+  "../Result/ASR_AirPollution.tiff",
+  plot   = map_asr,
+  width  = 8,
+  height = 5,
+  units  = "in",
+  dpi    = 600,
+  compression = "lzw"
+)
+```
+
+### Change
+
+```{r}
+asr_wide <- nation %>%
+  filter(
+    rei     == "Air pollution",
+    age     == "Age-standardized",
+    metric  == "Rate",
+    measure == "Deaths",
+    year    %in% c(1990, 2021)
+  ) %>%
+  select(iso_a3, year, val) %>%
+  pivot_wider(names_from = year, values_from = val,
+              names_prefix = "ASR_")
+
+# 3) Compute % change & categorical bins
+asr_change <- asr_wide %>%
+  mutate(
+    pct_chg = 100*(ASR_2021 - ASR_1990)/ASR_1990,
+    change_cat = cut(
+      pct_chg,
+      breaks = c(-Inf, -80, -40, -20, 0,  Inf),
+      labels = c(
+        ">80% decrease",
+        "40–80% decrease",
+        "20–40% decrease",
+        "<20% decrease",
+        "0–50% increase"
+      ),
+      right = FALSE
+    )
+  )
+
+# 4) Join to world sf, drop Antarctica
+world <- ne_countries(scale="medium", returnclass="sf") %>%
+  filter(continent!="Antarctica")
+
+world_plot <- world %>%
+  left_join(asr_change, by="iso_a3")
+
+# 5) Define your green→red palette
+pal <- c(
+  ">80% decrease"       = "#00441b",
+  "40–80% decrease"     = "#238b45",
+  "20–40% decrease"     = "#66c2a4",
+  "<20% decrease"       = "#fdbb84",
+  "0–50% increase"      = "#e34a33"
+)
+
+# 6) Build the map object
+map_asr <- ggplot(world_plot) +
+  # background
+  geom_sf(fill="grey95", color="white", size=0.2) +
+  # data
+  geom_sf(aes(fill=change_cat), color="grey80", size=0.1) +
+  # discrete scale
+  scale_fill_manual(
+    name   = "Change in ASR\n(1990–2021)",
+    values = pal,
+    na.value = "white",
+    drop   = FALSE
+  ) +
+  coord_sf(crs = "+proj=robin", datum=NA, expand=FALSE) +
+  # tag and labels
+  labs(
+    tag      = "B",
+    title    = "Percent Change in Age-Standardized Death Rate from \n Lower Respiratory Infections Attributable to Air Pollution",
+    subtitle = "1990 to 2021",
+    caption  = "Source: Global Burden of Disease Study 2021 Results"
+  ) +
+  # clean theme, Times font
+  theme_void(base_size = 14, base_family = "Times") +
+  theme(
+    plot.tag           = element_text(face="bold", size=18),
+    plot.tag.position  = c(0.02, 0.98),
+    plot.title         = element_text(face="bold", size=16, hjust=0.5),
+    plot.subtitle      = element_text(size=12, hjust=0.5),
+    plot.caption       = element_text(size=8, hjust=1),
+    legend.position    = c(0.05, 0.5),
+    legend.justification = c(0,0.5),
+    legend.title       = element_text(face="bold", size=10),
+    legend.text        = element_text(size=8)
+  )
+
+# 7) Preview
+print(map_asr)
+
+
+# 9) (Optional) Export a high-res TIFF
+ggsave(
+  "../Result/FigureB_ASRChange_AirPollution.tiff",
+  plot   = map_asr,
+  width  = 8, height = 5,
+  units  = "in",
+  dpi    = 600,
+  compression = "lzw"
+)
+```
+
+```{r}
+
+top3_decrease <- asr_change %>%
+  slice_min(pct_chg, n = 3) %>%
+  select(iso_a3, pct_chg)
+
+# Top 3 increases
+top3_increase <- asr_change %>%
+  slice_max(pct_chg, n = 5) %>%
+  select(iso_a3, pct_chg)
+
+top3_decrease
+top3_increase
+
+```
+
+### EAPC
+
+```{r}
+eapc_df <- nation %>%
+  filter(
+    rei     == "Air pollution",
+    age     == "Age-standardized",
+    metric  == "Rate",
+    measure == "Deaths"
+  ) %>%
+  group_by(location) %>%
+  summarise(
+    beta = coef(lm(log(val) ~ year, data = cur_data()))[2],
+    .groups = "drop"
+  ) %>%
+  mutate(
+    EAPC = (exp(beta) - 1) * 100,
+    # grab ISO3 for mapping
+    iso_a3 = countrycode(location,
+                         origin      = "country.name",
+                         destination = "iso3c")
+  ) %>%
+  filter(!is.na(iso_a3))
+
+world <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  filter(continent != "Antarctica")
+
+world_eapc <- world %>%
+  left_join(eapc_df, by = "iso_a3")
+
+map_eapc <- ggplot(world_eapc) +
+  geom_sf(aes(fill = EAPC), color = "grey80", size = 0.1) +
+  scale_fill_gradient2(
+    low      = muted("green"),
+    mid      = "white",
+    high     = muted("red"),
+    midpoint = 0,
+    oob      = squish,
+    na.value = "grey95",
+    name     = "EAPC (%)"
+  ) +
+  coord_sf(crs = "+proj=robin", datum = NA, expand = FALSE) +
+  theme_void(base_size = 14, base_family = "Times") +
+  theme(
+    plot.tag           = element_text(face="bold", size=18),
+    plot.title        = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle     = element_text(size = 12, hjust = 0.5),
+    legend.position.inside      = c(0.98, 0.98),  # near top‐right
+    legend.justification.inside = c(1, 1),
+    legend.background = element_rect(fill = "white", color = NA),
+    legend.title      = element_text(size = 10),
+    legend.text       = element_text(size = 8)
+  ) +
+  labs(
+    tag      = "C",
+    title    = "EAPC in Age-Standardized Death Rate from \nLower Respiratory Infections Attributable to Air Pollution",
+    subtitle = "1990–2021",
+    caption  = "Source: Global Burden of Disease Study 2021 Results"
+  )
+
+print(map_eapc)
+
+ggsave("../Result/FigureC_EAPC_AirPollution.tiff",
+       map_eapc,
+       width  = 8, height = 5, units = "in",
+       dpi    = 600,
+       compression = "lzw")
+```
+
+# SDI
+
+```{r}
+SDI <- read_csv("../Data/SDI.csv")
+glimpse(SDI)
+```
+
+```{r}
+SDI_sdi <- SDI %>%
+  filter(covariate_name_short == "sdi") %>% 
+  rename(
+    location = location_name,
+    year     = year_id,
+    SDI      = mean_value
+  ) %>% 
+  select(location, year, SDI)
+GBD_SDI <- GBD %>%
+  left_join(SDI_sdi, by = c("location", "year"))
+glimpse(GBD_SDI)
+```
+
+```{r}
+dat <- GBD %>%
+  left_join(SDI_sdi, by = c("location", "year")) %>%
+  filter(
+    rei     == "Air pollution",
+    age     == "Age-standardized",
+    metric  == "Rate",
+    measure == "DALYs (Disability-Adjusted Life Years)",
+    cause   == "Lower respiratory infections"
+  ) %>%
+  group_by(location, year, SDI) %>%
+  summarise(Rate = sum(val), .groups = "drop")
+
+regions <- setdiff(unique(dat$location), "Global")
+
+#— Plot —
+p_clean <- ggplot() +
+  # 1) Regional trajectories (all except “Global”), colored by location
+  geom_line(
+    data      = filter(dat, location != "Global"),
+    aes(x      = SDI, 
+        y      = Rate, 
+        group  = location, 
+        color  = location),
+    size  = 0.8,
+    alpha = 0.6
+  ) +
+  
+  # 2) Global trajectory: drawn as a bold black line, not part of the color scale
+  geom_line(
+    data      = filter(dat, location == "Global"),
+    aes(x      = SDI, 
+        y      = Rate),
+    color = "black",
+    size  = 1.3,
+    alpha = 1
+  ) +
+  
+  # 3) Regional 2021 endpoints (all except “Global”), same color scale
+  geom_point(
+    data = filter(dat, year == max(year) & location != "Global"),
+    aes(x = SDI, y = Rate, color = location),
+    size  = 2.5,
+    alpha = 0.8
+  ) +
+  
+  # 4) Color scale for regions only
+  scale_color_viridis_d(
+    option = "turbo",
+    begin  = 0.1, 
+    end    = 0.9,
+    guide  = guide_legend(
+      ncol      = 3,
+      byrow     = TRUE,
+      override.aes = list(size = 3, alpha = 1)
+    )
+  ) +
+  
+  # 5) Axes
+  scale_x_continuous(
+    name   = "Sociodemographic Index (SDI)",
+    labels = percent_format(1),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    name   = "Age-standardized DALY rate\n(per 100 000)",
+    labels = comma_format(accuracy = 1),
+    expand = c(0, 0)
+  ) +
+  
+  # 6) Annotations
+  labs(
+    title    = "DALY Rate vs SDI (1990–2021)",
+    subtitle = "Air pollution, age-standardized (Lower respiratory infections) by GBD super-region",
+    caption  = "Black line = global trend",
+    color    = NULL
+  ) +
+  
+  # 7) Theme
+  theme_minimal(base_family = "Times", base_size = 14) +
+  theme(
+    plot.tag.position  = c(0.02, 0.98),
+    plot.tag           = element_text(face = "bold", size = 18),
+    plot.title         = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle      = element_text(size = 12, hjust = 0.5),
+    plot.caption       = element_text(size = 8, hjust = 1),
+    axis.title         = element_text(size = 12),
+    axis.text          = element_text(size = 10),
+    panel.grid.major   = element_line(color = "grey90", size = 0.4),
+    panel.grid.minor   = element_blank(),
+    legend.position    = "bottom",
+    legend.direction   = "horizontal",
+    legend.key.size    = unit(0.5, "lines"),
+    legend.text        = element_text(size = 8),
+    legend.margin      = margin(t = 5, b = 5)
+  )
+
+print(p_clean)
+
+ggsave("../Result/FigureA_DALY_vs_SDI_clean.tiff", p_clean,
+       width = 8, height = 5, units = "in", dpi = 600, compression = "lzw")
+```
+
+#AAPC
+
+```{r}
+glimpse(nation)
+nation_asr_daly <- nation %>%
+  filter(
+    age     == "Age-standardized",
+    metric  == "Rate",
+    measure == "DALYs (Disability-Adjusted Life Years)"
+  ) %>%
+  # Now compute SE from upper/lower assuming they are 95% CIs:
+  mutate(
+    SE = (upper - lower) / (2 * 1.96)
+  ) %>%
+  # Keep only the columns you care about:
+  select(location, year, val, SE) %>%
+  arrange(location,year)
+
+# Inspect the first few rows
+print(nation_asr_daly)
+write_csv(nation_asr_daly, "../Data/nation_asr_daly.csv")
+```
+
+```{r}
+aapc <- read.table("../Data/aapc.txt") %>%
+  select(c(1,6,7,8)) %>%
+   rename(
+    Location = V1,
+    AAPC     = V6,
+    Lower_CI = V7,
+    Upper_CI = V8
+  )
+
+```
+
+```{r}
+aapc_formatted <- aapc %>%
+  # 1) coerce columns to numeric (if they were read as characters or factors)
+  mutate(
+    AAPC_numeric    = as.numeric(as.character(AAPC)),
+    Lower_CI_numeric = as.numeric(as.character(Lower_CI)),
+    Upper_CI_numeric = as.numeric(as.character(Upper_CI))
+  ) %>%
+  # 2) create the combined “value (lower – upper)” string
+  mutate(
+    AAPC = sprintf(
+      "%.2f (%.2f - %.2f)",
+      AAPC_numeric, Lower_CI_numeric, Upper_CI_numeric
+    )
+  ) %>%
+  # 3) keep only the columns you want
+  select(Location, AAPC)
+
+
+
+aapc_clean <- aapc_formatted %>%
+  # 1) Drop the row where Location == "location"
+  filter(Location != "location") %>%
+  # 2) Turn Location into a factor, putting "Global" first and everything else alphabetically after
+  mutate(Location = factor(
+    Location,
+    levels = c(
+      "Global",
+      sort(setdiff(unique(Location), "Global"))
+    )
+  )) %>%
+  # 3) Arrange by that new factor order (so Global is on top)
+  arrange(Location)
+
+# Inspect the result
+print(aapc_clean)
+write_csv(aapc_clean, "../Data/nation_aapc_clean.csv")
+```
+## graphic
+
+```{r}
+aapc_raw <- read.table("../Data/aapc.txt", header = TRUE) %>%
+  select(
+    Location   = 1,
+    AAPC_raw   = 6,
+    Lower_CI   = 7,
+    Upper_CI   = 8
+  ) %>%
+  # If Location was accidentally read as factor, convert to character:
+  mutate(
+    Location   = as.character(Location),
+    AAPC_raw   = as.numeric(as.character(AAPC_raw)),
+    Lower_CI   = as.numeric(as.character(Lower_CI)),
+    Upper_CI   = as.numeric(as.character(Upper_CI))
+  ) %>%
+  # Drop any spurious header‐row entry where Location == "Location":
+  filter(Location != "Location") %>%
+  # Compute the joint “numeric only” AAPC.  We’ll ignore the CI text formatting, since
+  # the map only needs the central estimate:
+  rename(
+    AAPC       = AAPC_raw
+  ) %>%
+  # Now use countrycode() to get ISO3 for each “Location”
+  mutate(
+    iso_a3 = countrycode(Location,
+                         origin      = "country.name",
+                         destination = "iso3c")
+  ) %>%
+  # Drop any rows where iso_a3 is NA (e.g., unmatched names):
+  filter(!is.na(iso_a3))
+
+# Inspect the first few rows
+# print(head(aapc_raw))
+
+#── 2) Load & prepare the world sf ───────────────────────────────────────────────
+
+world <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  filter(continent != "Antarctica")
+
+#── 3) Join AAPC onto the sf by iso_a3 ────────────────────────────────────────────
+
+world_aapc <- world %>%
+  left_join(aapc_raw, by = "iso_a3")
+
+#── 4) Make the AAPC map ─────────────────────────────────────────────────────────
+
+map_aapc <- ggplot(world_aapc) +
+  geom_sf(aes(fill = AAPC), color = "grey80", size = 0.1) +
+  scale_fill_gradient2(
+    low      = muted("green"),
+    mid      = "white",
+    high     = muted("red"),
+    midpoint = 0,
+    oob      = squish,
+    na.value = "grey95",
+    name     = "AAPC  (%)"
+  ) +
+  coord_sf(crs = "+proj=robin", datum = NA, expand = FALSE) +
+  theme_void(base_size = 14, base_family = "Times") +
+  theme(
+    plot.tag                    = element_text(face = "bold", size = 18),
+    plot.title                  = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle               = element_text(size = 12, hjust = 0.5),
+    legend.position.inside      = c(0.98, 0.98),
+    legend.justification.inside = c(1, 1),
+    legend.background           = element_rect(fill = "white", color = NA),
+    legend.title                = element_text(size = 10),
+    legend.text                 = element_text(size = 8)
+  ) +
+  labs(
+    tag      = "D",
+    title    = "AAPC in Age- Standardized Death Rate from\n Lower Respiratory Infections Attributable to Air Pollution",
+    subtitle = "Average Annual Percent Change, 1990–2021",
+    caption  = "Source: Global Burden of Disease Study 2021 Results"
+  )
+
+# Preview
+print(map_aapc)
+
+
+
+ggsave(
+  "../Result/FigureD_AAPC_AirPollution.tiff",
+  map_aapc,
+  width       = 8, height = 5,
+  units       = "in",
+  dpi         = 600,
+  compression = "lzw"
+)
+```
+
+## Super Region
+```{r}
+nation_daly <- GBD %>%
+  filter(
+    rei     == "Air pollution",
+    age     == "Age-standardized",
+    metric  == "Rate",
+    measure == "DALYs (Disability-Adjusted Life Years)",
+    cause   == "Lower respiratory infections"
+  ) %>%
+  # Now compute SE from upper/lower assuming they are 95% CIs:
+  mutate(
+    SE = (upper - lower) / (2 * 1.96)
+  ) %>%
+  # Keep only the columns you care about:
+  select(location, year, val, SE) %>%
+  arrange(location,year)
+
+# Inspect the first few rows
+print(nation_daly)
+write_csv(nation_daly, "../Data/region_daly.csv")
+```
+```{r}
+region_aapc <- read.table("../Data/region_aapc.txt") %>%
+  select(c(1,6,7,8)) %>%
+   rename(
+    Location = V1,
+    AAPC     = V6,
+    Lower_CI = V7,
+    Upper_CI = V8
+  )
+
+```
+
+```{r}
+raapc_formatted <- region_aapc %>%
+  # 1) coerce columns to numeric (if they were read as characters or factors)
+  mutate(
+    AAPC_numeric    = as.numeric(as.character(AAPC)),
+    Lower_CI_numeric = as.numeric(as.character(Lower_CI)),
+    Upper_CI_numeric = as.numeric(as.character(Upper_CI))
+  ) %>%
+  # 2) create the combined “value (lower – upper)” string
+  mutate(
+    AAPC = sprintf(
+      "%.2f (%.2f - %.2f)",
+      AAPC_numeric, Lower_CI_numeric, Upper_CI_numeric
+    )
+  ) %>%
+  # 3) keep only the columns you want
+  select(Location, AAPC)
+
+
+
+raapc_clean <- raapc_formatted %>%
+  # 1) Drop the row where Location == "location"
+  filter(Location != "location") %>%
+  # 2) Turn Location into a factor, putting "Global" first and everything else alphabetically after
+  mutate(Location = factor(
+    Location,
+    levels = c(
+      "Global",
+      sort(setdiff(unique(Location), "Global"))
+    )
+  )) %>%
+  # 3) Arrange by that new factor order (so Global is on top)
+  arrange(Location)
+
+# Inspect the result
+print(raapc_clean)
+
+```
+
+#Table
+```{r}
+# 2.1) Read & join SDI (sociodemographic index)
+SDI <- read_csv("../Data/SDI.csv") %>%
+  filter(covariate_name_short == "sdi") %>%
+  rename(
+    location  = location_name,
+    year      = year_id,
+    SDI_value = mean_value
+  ) %>%
+  select(location, year, SDI_value)
+
+```
+
+```{r}
+GBD2 <- GBD %>%
+  left_join(SDI, by = c("location", "year"))
+
+# 3) Compute SDI quintile based on 2019 distribution
+quints_2019 <- GBD2 %>%
+  filter(
+    age     == "Age-standardized",
+    metric  == "Rate",
+    measure == "Deaths",
+    rei     == "Air pollution",
+    year    == 2019
+  ) %>%
+  pull(SDI_value) %>%
+  quantile(probs = seq(0, 1, by = 0.2), na.rm = TRUE)
+
+GBD3 <- GBD2 %>%
+  mutate(
+    SDI_quintile = case_when(
+      SDI_value >= quints_2019[5]             ~ "High SDI",
+      SDI_value >= quints_2019[4] & SDI_value < quints_2019[5] ~ "High‐middle SDI",
+      SDI_value >= quints_2019[3] & SDI_value < quints_2019[4] ~ "Middle SDI",
+      SDI_value >= quints_2019[2] & SDI_value < quints_2019[3] ~ "Low-middle SDI",
+      SDI_value <  quints_2019[2]                          ~ "Low SDI",
+      TRUE ~ NA_character_
+    )
+  )
+
+# 4) If “super_region” is not already in your GBD, you must join a lookup.
+#    For this example, we assume GBD already has a column `super_region`.
+GBD4 <- GBD3
+
+# 5) Helper function: format “value [lower – upper]” with two decimals
+fmt_value_ui <- function(x, lo, hi, digits = 2) {
+  sprintf(
+    paste0("%.", digits, "f [%.", digits, "f – %.", digits, "f]"),
+    x, lo, hi
+  )
+}
+
+# 6) Summarise one stratum-year for incident cases & ASIR
+summarise_for_stratum_year <- function(df_slice) {
+  inc_df <- df_slice %>%
+    filter(measure == "Deaths", metric == "Number") %>%
+    summarise(
+      cases   = sum(val,   na.rm = TRUE) / 100,  # divide by 100 → ×10²
+      cases_lo = sum(lower, na.rm = TRUE) / 100,
+      cases_hi = sum(upper, na.rm = TRUE) / 100,
+      .groups = "drop"
+    )
+  asir_df <- df_slice %>%
+    filter(measure == "Deaths", metric == "Rate") %>%
+    summarise(
+      asir    = sum(val,   na.rm = TRUE),
+      asir_lo = sum(lower, na.rm = TRUE),
+      asir_hi = sum(upper, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  tibble(
+    Inc_cases  = fmt_value_ui(inc_df$cases,   inc_df$cases_lo,  inc_df$cases_hi,  digits = 2),
+    ASIR_rate  = fmt_value_ui(asir_df$asir,   asir_df$asir_lo,  asir_df$asir_hi,  digits = 2)
+  )
+}
+
+strata_list <- list(
+  Overall      = filter(GBD4, TRUE),
+  
+  # Sex
+  Female       = filter(GBD4, sex == "Female"),
+  Male         = filter(GBD4, sex == "Male"),
+  
+  # SDI quintiles
+  "High SDI"        = filter(GBD4, SDI_quintile == "High SDI"),
+  "High‐middle SDI" = filter(GBD4, SDI_quintile == "High‐middle SDI"),
+  "Middle SDI"      = filter(GBD4, SDI_quintile == "Middle SDI"),
+  "Low-middle SDI"  = filter(GBD4, SDI_quintile == "Low-middle SDI"),
+  "Low SDI"         = filter(GBD4, SDI_quintile == "Low SDI"),
+  
+  # Super‐regions (in your preferred order)
+  "North Africa and Middle East"  = filter(GBD4,location == "North Africa and Middle East"),
+  "South Asia"                    = filter(GBD4, location == "South Asia"),
+  "Southeast Asia"                = filter(GBD4, location == "Southeast Asia"),
+  "East Asia"                     = filter(GBD4, location == "East Asia"),
+  "Oceania"                       = filter(GBD4, location == "Oceania"),
+  "Central Asia"                  = filter(GBD4, location == "Central Asia"),
+  "Central Europe"                = filter(GBD4, location == "Central Europe"),
+  "Eastern Europe"                = filter(GBD4, location == "Eastern Europe"),
+  "High-income Asia Pacific"      = filter(GBD4, location == "High-income Asia Pacific"),
+  "Western Europe"                = filter(GBD4, location == "Western Europe"),
+  "Southern Latin America"        = filter(GBD4, location == "Southern Latin America"),
+  "High-income North America"     = filter(GBD4, location == "High-income North America"),
+  "Australasia"                   = filter(GBD4, location == "Australasia"),
+  "Caribbean"                     = filter(GBD4, location == "Caribbean"),
+  "Andean Latin America"          = filter(GBD4, location == "Andean Latin America"),
+  "Central Latin America"         = filter(GBD4, location == "Central Latin America"),
+  "Tropical Latin America"        = filter(GBD4, location == "Tropical Latin America"),
+  "Central Sub-Saharan Africa"    = filter(GBD4, location == "Central Sub-Saharan Africa"),
+  "Eastern Sub-Saharan Africa"    = filter(GBD4, location == "Eastern Sub-Saharan Africa"),
+  "Southern Sub-Saharan Africa"   = filter(GBD4, location == "Southern Sub-Saharan Africa"),
+  "Western Sub-Saharan Africa"    = filter(GBD4, location == "Western Sub-Saharan Africa")
+)
+
+# 3.3) Now loop over those strata and for each, apply summarise_for_stratum_year()
+#      to the 1990 subset and to the 2019 subset. Then bind into a single tibble.
+
+wide_results <- bind_rows(lapply(names(strata_list), function(stratum_name) {
+  df_all <- strata_list[[stratum_name]]
+  
+  # Summarise 1990
+  sum_1990 <- df_all %>%
+    filter(year == 2021) %>%
+    summarise_for_stratum_year() %>%
+    rename(Inc_1990  = Inc_cases,
+           ASIR_1990 = ASIR_rate)
+  
+  # Summarise 2019
+  sum_2019 <- df_all %>%
+    filter(year == 2019) %>%
+    summarise_for_stratum_year() %>%
+    rename(Inc_2019  = Inc_cases,
+           ASIR_2019 = ASIR_rate)
+  
+  # Prepare data for EAPC fit: all years 1990–2019 for ASIR
+  eapc_fit <- df_all %>%
+    filter(
+      age     == "Age-standardized",
+      metric  == "Rate",
+      measure == "Deaths",
+      year    >= 1990, year <= 2021
+    ) %>%
+    group_by(year) %>%
+    summarise(
+      asir_val = sum(val,   na.rm = TRUE),
+      asir_lo  = sum(lower, na.rm = TRUE),
+      asir_hi  = sum(upper, na.rm = TRUE),
+      .groups  = "drop"
+    )
+  
+  # Check if we have at least two valid years
+  if (nrow(eapc_fit %>% filter(!is.na(asir_val))) >= 2) {
+    beta_cent <- coef(lm(log(asir_val) ~ year, data = eapc_fit))[2]
+    beta_low  <- coef(lm(log(asir_lo)  ~ year, data = eapc_fit))[2]
+    beta_hi   <- coef(lm(log(asir_hi)  ~ year, data = eapc_fit))[2]
+    
+    eapc_cent <- (exp(beta_cent) - 1) * 100
+    eapc_lo   <- (exp(beta_low)  - 1) * 100
+    eapc_hi   <- (exp(beta_hi)   - 1) * 100
+    
+    EAPC_text <- sprintf("%.2f [%.2f – %.2f]", eapc_cent, eapc_lo, eapc_hi)
+  } else {
+    EAPC_text <- NA_character_
+  }
+  
+  tibble(
+    Stratum   = stratum_name,
+    Inc_1990  = sum_1990$Inc_1990,
+    ASIR_1990 = sum_1990$ASIR_1990,
+    Inc_2021 = sum_2019$Inc_2019,
+    ASIR_2021 = sum_2019$ASIR_2019,
+    EAPC      = EAPC_text
+  )
+}))
+
+# 9) Re‐order rows
+row_order <- c(
+  "Overall",
+  "Female", "Male",
+  "High SDI", "High‐middle SDI", "Middle SDI", "Low-middle SDI", "Low SDI",
+  "North Africa and Middle East", "South Asia", "Southeast Asia", "East Asia", "Oceania",
+  "Central Asia", "Central Europe", "Eastern Europe", "High-income Asia Pacific",
+  "Western Europe", "Southern Latin America", "High-income North America",
+  "Australasia", "Caribbean", "Andean Latin America", "Central Latin America",
+  "Tropical Latin America", "Central Sub-Saharan Africa", "Eastern Sub-Saharan Africa",
+  "Southern Sub-Saharan Africa", "Western Sub-Saharan Africa"
+)
+
+table_final <- wide_results %>%
+  mutate(Stratum = factor(Stratum, levels = row_order)) %>%
+  arrange(Stratum)
+
+# (Assuming you have already run all of the code that produces `table_final`)
+
+table_final_noSex <- table_final %>%
+  filter(!Stratum %in% c("Female", "Male"))
+
+knitr::kable(
+  table_final_noSex,
+  col.names = c(
+    "Stratum",
+    "Inc 1990 (×10²) [95% UI]",
+    "ASIR 1990 [95% UI]",
+    "Inc 2021 (×10²) [95% UI]",
+    "ASIR 2021 [95% UI]",
+    "EAPC 1990–2021 [95% CI]"
+  ),
+  align   = c("l", rep("c", 5)),
+  caption = "Table X. Incident cases (×10²), ASIR (per 100 000), and EAPC of age-standardized death rates from air-pollution–attributable respiratory infections, by demographic stratum (sex removed)."
+) %>%
+  kable_styling(
+    full_width = TRUE,
+    position   = "left",
+    font_size  = 10
+  )
+
+```
+```{r}
+table_with_aapc <- table_final_noSex %>%
+  mutate(
+    Stratum = if_else(Stratum == "Overall", "Global", Stratum)
+  ) %>%
+  left_join(
+    raapc_clean %>% rename(Stratum = Location),
+    by = "Stratum"
+  ) %>%
+  select(
+    Stratum,
+    Inc_1990,
+    ASIR_1990,
+    Inc_2021,
+    ASIR_2021,
+    AAPC
+  )
+
+table_final_keepGlobal <- table_with_aapc %>%
+  filter(!is.na(AAPC))
+# 2) Render the updated table
+knitr::kable(
+  table_final_keepGlobal ,
+  col.names = c(
+    "Stratum",
+    "Inc 1990 (×10²) [95% UI]",
+    "ASIR 1990 [95% UI]",
+    "Inc 2021 (×10²) [95% UI]",
+    "ASIR 2021 [95% UI]",
+    "AAPC 1990–2021 [95% CI]"
+  ),
+  align   = c("l", rep("c", 5)),
+  caption = "Table X. Incident cases (×10²), ASIR (per 100 000), and AAPC of age‐standardized death rates from air‐pollution–attributable respiratory infections, by demographic stratum."
+) %>%
+  kable_styling(
+    full_width = TRUE,
+    position   = "left",
+    font_size  = 10
+  )
+```
+
+```{r}
+table_latex <- table_final_keepGlobal %>%
+  mutate(Stratum = "Global")
+
+# 2) Render as a LaTeX table with booktabs style
+latex_code <- kable(
+  table_latex,
+  format      = "latex",
+  booktabs    = TRUE,
+  escape      = TRUE,
+  col.names   = c(
+    "Geography",
+    "Inc 1990 (×10²) [95\\% UI]",
+    "ASIR 1990 [95\\% UI]",
+    "Inc 2019 (×10²) [95\\% UI]",
+    "ASIR 2019 [95\\% UI]",
+    "AAPC 1990–2019 [95\\% CI]"
+  ),
+  align       = c("l", rep("c", 5)),
+  caption     = "Global – Incident cases (×10²), ASIR (per 100 000), and AAPC of age‐standardized death rates from air‐pollution–attributable respiratory infections."
+) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"), 
+    font_size     = 10
+  )
+
+# 3) Print the LaTeX code to the console:
+cat(latex_code)
+```
+
